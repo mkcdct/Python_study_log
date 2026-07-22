@@ -3,6 +3,23 @@ import random
 
 # pygame 초기화
 pygame.init()
+pygame.mixer.init() # 소리 재생을 위한 초기화.
+try:
+    collision_sound = pygame.mixer.Sound("collision.wav")
+except (pygame.error, FileNotFoundError) as e:
+    print(f"사운드 로드 실패: {e}")
+    collision_sound = None
+try:
+    gameover_sound = pygame.mixer.Sound("gameover.wav")
+except (pygame.error, FileNotFoundError) as e:
+    print(f"사운드 로드 실패: {e}")
+    gameover_sound = None
+try:
+    pygame.mixer.music.load("bgm.mp3")
+    pygame.mixer.music.play(-1)
+except (pygame.error, FileNotFoundError) as e:
+    print(f"배경음악 로드 실패: {e}")
+   
 
 # 장애물 추가
 def create_obstacle():
@@ -12,7 +29,8 @@ obstacles = [create_obstacle() for _ in range(3)] # 장애물 3개
 best_time = 0
 
 def reset_game():
-    global player, score, game_over, obstacles, obstacle_speed, start_time, is_new_record
+    global player, score, game_over, obstacles, obstacle_speed, start_time, is_new_record, current_level
+    global powerup, invincible, invincible_until
     # global 사용함으로써 전역 변수임을 명시.
     player = pygame.Rect(400, 300, 50, 50)
     score = 3
@@ -21,9 +39,15 @@ def reset_game():
     obstacles = [create_obstacle() for _ in range(3)]
     start_time = pygame.time.get_ticks() # reset함수가 호출된 시점의 시각 값(고정 값).
     is_new_record = False
+    current_level = 0
+    powerup = None
+    invincible = False
+    invincible_until = 0 # 무적이 언제 끝나는지(tick 기준)
 
 reset_game() # 처음 시작할 때 한 번 호출
 
+def create_powerup():
+    return pygame.Rect(random.randint(0, 750), random.randint(-600, 0), 40, 40)
 # 폰트 객체 생성
 font = pygame.font.SysFont(None, 50) # None : pygame이 알아서 폰트 선택.
 #text_surface = font.render("Collision!", True, (255, 255, 255))
@@ -61,13 +85,57 @@ while running:
             player.y += speed
         
         for obs in obstacles:
-            obs.y += obstacle_speed
+            obs.y += obstacle_speed # 장애물의 이동 속도가 점점 빨라짐.
             if obs.top > 600:
                 obs.y = 0
                 obs.x = random.randint(0, 750)
                 obstacle_speed += 0.1
 
         survival_time = (pygame.time.get_ticks() - start_time) // 1000 # 밀리초에서 초 단위로 변환.
+
+        new_level = survival_time // 10
+        if new_level > current_level:
+            current_level = new_level
+            obstacles.append(create_obstacle())
+            obstacle_speed += 1
+        # 무적상태 만료 체크(제일 먼저)
+        if invincible and pygame.time.get_ticks() > invincible_until:
+            invincible = False
+
+        for obs in obstacles:
+            if player.colliderect(obs):
+                if invincible:
+                    continue
+            
+                if collision_sound:
+                    collision_sound.play()
+                score -= 1
+                player.x, player.y = 400, 300
+                # 충돌 후 게임을 재시작할 때, 장애물의 위치도 초기화.
+                obs.y = 0
+                obs.x = random.randint(0, 750)
+                if score <= 0:
+                    game_over = True
+                    if gameover_sound:
+                        gameover_sound.play()
+                    if survival_time > best_time:
+                        best_time = survival_time
+                        is_new_record = True
+        # 파워업이 없는 상태라면, 아주 낮은 확률로 하나 생성
+        if powerup is None and random.random() < 0.002:
+            powerup = create_powerup()
+
+        # 파워업이 존재하면, 낙하시킴
+        if powerup is not None:
+            powerup.y += obstacle_speed
+            if powerup.top > 600:
+                powerup = None
+        
+        # 파워업 획득 체크
+        if powerup is not None and player.colliderect(powerup):
+            invincible = True
+            invincible_until = pygame.time.get_ticks() + 5000
+            powerup = None
 
     # 사각형이 틀 밖으로 나가는 것을 방지
     if player.left < 0:
@@ -81,24 +149,14 @@ while running:
         
     # 화면을 하늘색으로 채우기
     screen.fill((135, 206, 235))
-    pygame.draw.rect(screen, (255, 0, 0), player) # 빨간 사각형 생성
+    player_color = (0, 255, 0) if invincible else (255, 0, 0)
+    pygame.draw.rect(screen, player_color, player) # 빨간 사각형 생성
     for obs in obstacles:
         pygame.draw.rect(screen, (0,0,0), obs)
+    if powerup is not None:
+        pygame.draw.rect(screen, (255, 255, 0), powerup)
     # 그리는 순서 중요 : 순서대로 덮어씌워짐.
 
-    for obs in obstacles:
-        if player.colliderect(obs):
-            score -= 1
-            player.x, player.y = 400, 300
-            # 충돌 후 게임을 재시작할 때, 장애물의 위치도 초기화.
-            obs.y = 0
-            obs.x = random.randint(0, 750)
-            if score <= 0:
-                game_over = True
-                if survival_time > best_time:
-                    best_time = survival_time
-                    is_new_record = True
-        
 
         '''text_surface = font.render("Collision!", True, (255, 255, 255))
         screen.blit(text_surface, (350, 250))
@@ -109,6 +167,11 @@ while running:
     screen.blit(score_surface, (20, 20))
     survival_surface = font.render(f"Time : {survival_time}s", True, (255, 255, 255))
     screen.blit(survival_surface, (20, 70))
+    level_surface = font.render(f"Level : {current_level}", True, (255, 255, 255))
+    screen.blit(level_surface, (20, 120))
+    if invincible:
+        invincible_surface = font.render("Invincible", True, (0, 255, 255))
+        screen.blit(invincible_surface, (20, 170))
 
     if game_over:
         over_surface = font.render("game over", True, (255, 0 , 0))
