@@ -3,3 +3,10 @@
 /module.py
 /module_exercise.py
 /파이썬 전문가 1급.py
+# 이미지/사운드 에셋
+*.png
+*.wav
+*.mp3
+
+# 로컬 저장 데이터
+best_time.txt
