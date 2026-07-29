@@ -41,7 +41,7 @@ if not obstacle_imgs:
 
 try:
     powerup_img = pygame.image.load("powerupGreen_shield.png").convert_alpha()
-    powerup_img = pygame.transform.scale(powerup_img, (40, 40))
+    powerup_img = pygame.transform.scale(powerup_img, (30, 30))
 except (pygame.error, FileNotFoundError) as e:
     print(f"파워업 이미지 로드 실패: {e}")
     powerup_img = None
@@ -111,6 +111,10 @@ def create_obstacle():
     return {"rect": rect, "img": img, "base_x": base_x, "phase": random.uniform(0, math.pi * 2), "amplitude": random.randint(30, 80)}
    # random.randint : 정수 랜덤, random.uniform : 실수 랜덤.
 
+is_slowed = False
+slow_until = 0
+slow_factor = 0.5
+slow_duration = 4000
 is_respawning = False
 respawn_until = 0
 
@@ -118,6 +122,7 @@ def reset_game():
     global player, score, game_state, obstacles, obstacle_speed, start_time, is_new_record, current_level, survival_time
     global powerup, invincible, invincible_until
     global is_respawning, respawn_until
+    global is_slowed, slow_until
     # global 사용함으로써 전역 변수임을 명시.
     player = pygame.Rect(400, 300, 50, 50)
     score = 3
@@ -133,13 +138,19 @@ def reset_game():
     is_respawning = False
     respawn_until = 0
     survival_time = 0 # 생존시간 초기화
+    is_slowed = False
+    slow_until = 0
 
 reset_game() # 처음 시작할 때 한 번 호출
 
 game_state = STATE_START # 처음엔 시작 화면 상태로 시작. 즉, reset 함수 호출하고, game_state를 START로 덮어씀.
 
-def create_powerup():
-    return pygame.Rect(random.randint(0, 750), random.randint(-600, 0), 40, 40)
+powerup_types = ['invincible', 'life', 'slow']
+
+def create_powerup(x, y):
+    ptype = random.choice(powerup_types)
+    return {'rect': pygame.Rect(x, y, 30, 30), 'type' : ptype}
+ 
 # 폰트 객체 생성
 font = pygame.font.SysFont(None, 50) # None : pygame이 알아서 폰트 선택.
 #text_surface = font.render("Collision!", True, (255, 255, 255))
@@ -185,7 +196,8 @@ while running:
                 player.y += speed
             
             for obs in obstacles:
-                obs["rect"].y += obstacle_speed # 장애물의 이동 속도가 점점 빨라짐.
+                current_speed = obstacle_speed * slow_factor if is_slowed else obstacle_speed
+                obs["rect"].y += current_speed # 장애물의 이동 속도가 점점 빨라짐.
 
                 # 좌우 흔들림 계산 (이 부분이 빠져 있었음)
                 t = pygame.time.get_ticks() / 500
@@ -212,9 +224,11 @@ while running:
                 current_level = new_level
                 obstacles.append(create_obstacle())
                 obstacle_speed += 0.3
-            # 무적상태 만료 체크(제일 먼저)
+            # 무적상태 만료 체크(제일 먼저) & 장애물 속도 감소 상태 만료 체크
             if invincible and pygame.time.get_ticks() > invincible_until:
                 invincible = False
+            if is_slowed and pygame.time.get_ticks() > slow_until:
+                is_slowed = False
 
             for obs in obstacles:
                 if game_state != STATE_PLAYING:
@@ -255,18 +269,24 @@ while running:
 
             # 파워업이 없는 상태라면, 아주 낮은 확률로 하나 생성
             if powerup is None and random.random() < 0.002:
-                powerup = create_powerup()
+                powerup = create_powerup(random.randint(0, 800 - 30), 0)
 
             # 파워업이 존재하면, 낙하시킴
             if powerup is not None:
-                powerup.y += obstacle_speed
-                if powerup.top > 600:
+                powerup['rect'].y += obstacle_speed
+                if powerup['rect'].top > 600:
                     powerup = None
             
             # 파워업 획득 체크
-            if powerup is not None and player.colliderect(powerup):
-                invincible = True
-                invincible_until = pygame.time.get_ticks() + 5000
+            if powerup is not None and player.colliderect(powerup['rect']):
+                if powerup['type'] == 'invincible':
+                    invincible = True
+                    invincible_until = pygame.time.get_ticks() + 5000
+                elif powerup['type'] == 'slow':
+                    is_slowed = True
+                    slow_until = pygame.time.get_ticks() + slow_duration
+                elif powerup['type'] == 'life':
+                    score += 1
                 powerup = None
 
     # 사각형이 틀 밖으로 나가는 것을 방지
@@ -304,10 +324,13 @@ while running:
             else:
                 pygame.draw.rect(screen, (0,0,0), obs["rect"])
         if powerup is not None:
+            color_map = {'invincible': (255, 255, 0), 'life' : (0, 255, 0), 'slow' : (0, 150, 255)}
             if powerup_img:
-                screen.blit(powerup_img, powerup)
+                screen.blit(powerup_img, powerup['rect'])
+                pygame.draw.rect(screen, color_map[powerup['type']], powerup['rect'], 3)
             else:
-                pygame.draw.rect(screen, (255, 255, 0), powerup)
+                pygame.draw.rect(screen, color_map[powerup['type']], powerup['rect'])
+
         # 그리는 순서 중요 : 순서대로 덮어씌워짐.
         if is_respawning:
             remaining_ms = respawn_until - pygame.time.get_ticks() # 목표시간까지 얼마나 남았는지
@@ -331,6 +354,9 @@ while running:
         if invincible:
             invincible_surface = font.render("Invincible", True, (0, 255, 255))
             screen.blit(invincible_surface, (20, 170))
+        if is_slowed:
+            slow_surface = font.render('slowed obstacles', True, (0, 150, 255))
+            screen.blit(slow_surface, (20, 220))
 
     elif game_state == STATE_GAMEOVER:
         over_surface = font.render("game over", True, (255, 0 , 0))
