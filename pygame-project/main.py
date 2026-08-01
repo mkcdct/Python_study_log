@@ -108,7 +108,7 @@ def create_obstacle():
     else:
         img = None
 
-    return {"rect": rect, "img": img, "base_x": base_x, "phase": random.uniform(0, math.pi * 2), "amplitude": random.randint(30, 80)}
+    return {"rect": rect, "img": img, "base_x": base_x, "phase": random.uniform(0, math.pi * 2), "amplitude": random.randint(30, 80), "hp" : 3, "active" : True, "respawn_at" : 0}
    # random.randint : 정수 랜덤, random.uniform : 실수 랜덤.
 
 is_slowed = False
@@ -123,6 +123,7 @@ def reset_game():
     global powerup, invincible, invincible_until
     global is_respawning, respawn_until
     global is_slowed, slow_until
+    global missiles, last_missile_time
     # global 사용함으로써 전역 변수임을 명시.
     player = pygame.Rect(400, 300, 50, 50)
     score = 3
@@ -140,6 +141,8 @@ def reset_game():
     survival_time = 0 # 생존시간 초기화
     is_slowed = False
     slow_until = 0
+    missiles = []
+    last_missile_time = 0
 
 reset_game() # 처음 시작할 때 한 번 호출
 
@@ -160,6 +163,9 @@ font = pygame.font.SysFont(None, 50) # None : pygame이 알아서 폰트 선택.
 speed = 5
 
 clock = pygame.time.Clock() # 프레임 속도 조절용
+
+missile_speed = 10 # 미사일 속도
+missile_cooldown = 400 # 밀리초 단위, 이 시간마다 자동으로 한 발씩 발사.
 
 
 # 게임 루프 실행 여부
@@ -194,8 +200,37 @@ while running:
                 player.y -= speed
             if keys[pygame.K_DOWN]:
                 player.y += speed
-            
+
+            # 미사일 자동 발사
+            now_ticks = pygame.time.get_ticks()
+            if now_ticks - last_missile_time >= missile_cooldown:
+                missiles.append(pygame.Rect(player.centerx -3, player.top - 15, 6, 15))
+                last_missile_time = now_ticks
+
+            # 미사일 이동 및 화면 밖으로 나간 미사일 제거
+            for missile in missiles[:]: # 복사본을 만들어서 반복문 돌림.
+                missile.y -= missile_speed
+                if missile.bottom < 0:
+                    missiles.remove(missile)
+
             for obs in obstacles:
+                if not obs["active"]:
+                    # 파괴된 장애물은 respawn_at 시간이 되면 새 장애물로 부활
+                    if pygame.time.get_ticks() >= obs["respawn_at"]:
+                        size = random.choice(obstacle_sizes)
+                        obs["base_x"] = random.randint(0, 800 - size)
+                        obs["rect"].size = (size, size)
+                        obs["rect"].y = 0
+                        obs["rect"].x = obs["base_x"]
+                        obs["phase"] = random.uniform(0, math.pi * 2)
+                        obs["amplitude"] = random.randint(30, 80)
+                        obs["hp"] = 3
+                        obs["active"] = True
+                        if obstacle_imgs:
+                            chosen_img = random.choice(obstacle_imgs)
+                            obs["img"] = pygame.transform.scale(chosen_img, (size, size))
+                    continue # 비활성 상태인 동안은 이동/충돌 로직을 건너뜀.
+
                 current_speed = obstacle_speed * slow_factor if is_slowed else obstacle_speed
                 obs["rect"].y += current_speed # 장애물의 이동 속도가 점점 빨라짐.
 
@@ -215,7 +250,19 @@ while running:
                     if obstacle_imgs:
                         chosen_img = random.choice(obstacle_imgs)
                         obs["img"] = pygame.transform.scale(chosen_img, (size, size))
-                    
+
+            # 미사일-장애물 충돌 체크
+            for missile in missiles[:]:
+                for obs in obstacles:
+                    if not obs["active"]:
+                        continue    
+                    if missile.colliderect(obs["rect"]):
+                        obs["hp"] -= 1
+                        missiles.remove(missile)
+                        if obs["hp"] <= 0:
+                            obs["active"] = False
+                            obs["respawn_at"] = pygame.time.get_ticks() + 1000 # 1초 후에 부활
+                        break # 한 번 충돌하면 더 이상 체크하지 않음.        
 
             survival_time = (pygame.time.get_ticks() - start_time) // 1000 # 밀리초에서 초 단위로 변환.
             
@@ -323,6 +370,9 @@ while running:
                 screen.blit(obs["img"], obs["rect"])
             else:
                 pygame.draw.rect(screen, (0,0,0), obs["rect"])
+        for missile in missiles:
+            pygame.draw.rect(screen, (255, 255, 0), missile)
+        
         if powerup is not None:
             color_map = {'invincible': (255, 255, 0), 'life' : (0, 255, 0), 'slow' : (0, 150, 255)}
             if powerup_img:
