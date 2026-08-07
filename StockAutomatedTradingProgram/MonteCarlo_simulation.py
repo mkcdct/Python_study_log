@@ -1,4 +1,3 @@
-# 상승장 익절 목표 50% & 50%달성 시 절반 청산 후 나머지는 트레일링 스탑에 위임.
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -10,7 +9,7 @@ END_DATE = "2026-06-30"
 
 COMMISSION_PCT = 0.0005
 BASE_SLIPPAGE_PCT = 0.0005
-TARGET_PROFIT_PCT = 0.50  # [수정] +50% 도달 시 50% 분할 익절 후 나머지 트레일링
+TARGET_PROFIT_PCT = 0.50  # +50% 도달 시 50% 분할 익절 후 나머지 트레일링
 
 # 파킹통장(CMA 등) 연동 가정: 연 2.5% 금리를 일일 복리로 적용
 CASH_ANNUAL_RATE = 0.025
@@ -76,7 +75,7 @@ def add_indicators(df):
 
 def run_dynamic_strategy_single_stock(df, market_trend_series, market_mom_series):
     df = df.copy()
-    position = 0.0          # 포지션 비중 (0.0, 0.5, 1.0)
+    position = 0.0          
     entry_price = 0.0
     highest_price = 0.0
     holding_days = 0
@@ -112,7 +111,6 @@ def run_dynamic_strategy_single_stock(df, market_trend_series, market_mom_series
             else:
                 is_condition = (pd.notna(rsi) and rsi <= 35) or (pd.notna(lower) and sig_close <= lower)
 
-            # 전량(1.0) 진입
             if is_condition:
                 position = 1.0
                 entry_price = open_p * (1 + dynamic_slippage)
@@ -129,7 +127,6 @@ def run_dynamic_strategy_single_stock(df, market_trend_series, market_mom_series
             prev_close = df['Close'].iloc[i-1] if i > 0 else close_p
             daily_ret = (close_p / prev_close) - 1 if prev_close > 0 else 0
 
-            # 1) +50% 도달 시점 체크 (포지션 1.0일 때 50% 절반 익절)
             hit_target_profit = (position == 1.0) and (sig_close >= entry_price * (1 + TARGET_PROFIT_PCT))
 
             if hit_target_profit:
@@ -137,9 +134,8 @@ def run_dynamic_strategy_single_stock(df, market_trend_series, market_mom_series
                 net_day_ret = half_profit_ret + (daily_ret * 0.5) - COMMISSION_PCT
                 strategy_returns.append(net_day_ret)
                 exit_flags.append(False) 
-                position = 0.5  # 잔여 비중 50%로 축소 후 트레일링 위임
+                position = 0.5  
             else:
-                # 2) 트레일링 스탑 / 손절 조건 체크
                 if is_market_bullish or is_v_rebound:
                     dynamic_trailing_pct = max(0.06, current_atr_pct * 3.0)
                     hit_exit = (sig_close <= highest_price * (1 - dynamic_trailing_pct))
@@ -153,7 +149,7 @@ def run_dynamic_strategy_single_stock(df, market_trend_series, market_mom_series
                 if hit_exit:
                     net_day_ret = (daily_ret * position) - COMMISSION_PCT
                     strategy_returns.append(net_day_ret)
-                    exit_flags.append(True) # 잔여 포지션 청산 완료 -> 종목 교체 플래그 ON
+                    exit_flags.append(True) 
 
                     position = 0.0
                     entry_price = 0.0
@@ -168,7 +164,7 @@ def run_dynamic_strategy_single_stock(df, market_trend_series, market_mom_series
     return df
 
 if __name__ == "__main__":
-    print("[*] 시장 국면 분석용 SPY 데이터 로딩 중 (2020~2026 상반기)...")
+    print("[*] 시장 국면 분석용 SPY 데이터 로딩 중...")
     spy_df = fetch_data("SPY", START_DATE, END_DATE)
     if spy_df is not None:
         spy_df['Market_MA'] = spy_df['Close'].rolling(window=200).mean()
@@ -180,7 +176,7 @@ if __name__ == "__main__":
     universe_dict = get_modern_robust_universe()
     all_dfs = {}
 
-    print("[*] 2020년대 유니버스 전체 데이터 준비 중...")
+    print("[*] 유니버스 데이터 준비 및 백테스트 실행 중...")
     for ticker, sector in universe_dict.items():
         df = fetch_data(ticker, START_DATE, END_DATE)
         if df is None: continue
@@ -192,13 +188,11 @@ if __name__ == "__main__":
     sample_ticker = list(all_dfs.keys())[0]
     dates = all_dfs[sample_ticker]['df'].index
 
-    print("[*] 최종 포트폴리오 시뮬레이션 실행 중 (+50% 분할 익절 적용)...")
     processed_dfs = {}
     for t, info in all_dfs.items():
         processed_dfs[t] = run_dynamic_strategy_single_stock(info['df'], market_trend, market_mom)
 
     portfolio_returns = []
-    bnh_returns = []
     current_portfolio = {}
     MAX_SLOTS = 3  
 
@@ -234,70 +228,79 @@ if __name__ == "__main__":
                 current_portfolio[t] = {'sector': s}
 
         day_port_ret = 0.0
-        day_bnh_ret = 0.0
-
         active_tickers = list(current_portfolio.keys())
         active_count = len(active_tickers)
         
         if active_count > 0:
-            port_vals, bnh_vals = [], []
+            port_vals = []
             for t in active_tickers:
                 p_df = processed_dfs[t]
                 if current_date in p_df.index:
                     port_vals.append(p_df.loc[current_date, 'Strategy_Return'])
-                    prev_close = p_df['Close'].shift(1).loc[current_date]
-                    curr_close = p_df.loc[current_date, 'Close']
-                    bnh_vals.append((curr_close / prev_close - 1) if pd.notna(prev_close) and prev_close > 0 else 0)
             
             if port_vals:
                 stock_weight = active_count / MAX_SLOTS
                 cash_weight = 1.0 - stock_weight
-                
                 weighted_stock_ret = np.mean(port_vals) * stock_weight
                 weighted_cash_ret = CASH_RETURN_DAILY * cash_weight
-                
                 day_port_ret = weighted_stock_ret + weighted_cash_ret
-                day_bnh_ret = np.mean(bnh_vals)
         else:
             day_port_ret = CASH_RETURN_DAILY
 
         portfolio_returns.append(day_port_ret)
-        bnh_returns.append(day_bnh_ret)
 
     port_ret_series = pd.Series(portfolio_returns, index=dates)
-    bnh_ret_series = pd.Series(bnh_returns, index=dates)
 
-    cum_portfolio = (1 + port_ret_series).cumprod()
-    final_port_return = cum_portfolio.iloc[-1] - 1
-    port_mdd = ((cum_portfolio - cum_portfolio.cummax()) / cum_portfolio.cummax()).min()
+    # ==========================================
+    # 🎲 몬테카를로 시뮬레이션 실행 (1,000회 셔플)
+    # ==========================================
+    print("[*] 몬테카를로 시뮬레이션(1,000회 재샘플링) 실행 중...")
+    NUM_SIMULATIONS = 1000
+    sim_returns_matrix = np.zeros((len(port_ret_series), NUM_SIMULATIONS))
 
-    cum_bnh = (1 + bnh_ret_series).cumprod()
-    final_bnh_return = cum_bnh.iloc[-1] - 1
-    bnh_mdd = ((cum_bnh - cum_bnh.cummax()) / cum_bnh.cummax()).min()
+    returns_array = port_ret_series.values
 
-    port_daily_std = port_ret_series.std()
-    port_sharpe = (port_ret_series.mean() / port_daily_std) * np.sqrt(252) if port_daily_std > 0 else np.nan
-    bnh_daily_std = bnh_ret_series.std()
-    bnh_sharpe = (bnh_ret_series.mean() / bnh_daily_std) * np.sqrt(252) if bnh_daily_std > 0 else np.nan
+    for sim in range(NUM_SIMULATIONS):
+        # 일일 수익률 배열을 무작위로 섞음 (Bootstrapping / Shuffling)
+        shuffled_returns = np.random.choice(returns_array, size=len(returns_array), replace=True)
+        cum_sim = np.cumprod(1 + shuffled_returns)
+        sim_returns_matrix[:, sim] = cum_sim
+
+    # 통계치 계산
+    final_sim_returns = sim_returns_matrix[-1, :] - 1
+    mean_final_return = np.mean(final_sim_returns)
+    percentile_5_return = np.percentile(final_sim_returns, 5)   # 최악의 경우 (하위 5%)
+    percentile_95_return = np.percentile(final_sim_returns, 95) # 행운의 경우 (상위 5%)
+
+    # 가상 시뮬레이션별 MDD 계산
+    sim_mdds = []
+    for sim in range(NUM_SIMULATIONS):
+        curve = sim_returns_matrix[:, sim]
+        mdd = np.min((curve - np.maximum.accumulate(curve)) / np.maximum.accumulate(curve))
+        sim_mdds.append(mdd)
+    
+    mean_mdd = np.mean(sim_mdds)
+    worst_mdd_5pct = np.percentile(sim_mdds, 5) # 최악의 MDD (하위 5% 위험선)
 
     print(f"\n{'='*55}")
-    print(f" 최종 최적화 전략 성과 (+50% 익절, 2020 ~ 2026.06)")
+    print(f" 🎲 몬테카를로 시뮬레이션 결과 (1,000회 가상 검증)")
     print(f"{'='*55}")
-    print(f" [동적 리밸런싱 전략]")
-    print(f"  - 최종 수익률 : {final_port_return * 100:.2f}%")
-    print(f"  - 최대낙폭(MDD): {port_mdd * 100:.2f}%")
-    print(f"  - 샤프비율     : {port_sharpe:.2f}")
+    print(f" [최종 누적 수익률 분포]")
+    print(f"  - 평균 예측 수익률 : {mean_final_return * 100:.2f}%")
+    print(f"  - 하위 5% (최악)   : {percentile_5_return * 100:.2f}%")
+    print(f"  - 상위 5% (최고)   : {percentile_95_return * 100:.2f}%")
     print(f"{'-'*55}")
-    print(f" [단순보유 (Buy & Hold 유니버스 평균)]")
-    print(f"  - 최종 수익률 : {final_bnh_return * 100:.2f}%")
-    print(f"  - 최대낙폭(MDD): {bnh_mdd * 100:.2f}%")
-    print(f"  - 샤프비율     : {bnh_sharpe:.2f}")
+    print(f" [최대 낙폭(MDD) 리스크 분포]")
+    print(f"  - 평균 예상 MDD    : {mean_mdd * 100:.2f}%")
+    print(f"  - 하위 5% (최악 MDD): {worst_mdd_5pct * 100:.2f}%")
     print(f"{'='*55}")
 
+    # 시각화
     plt.figure(figsize=(12, 6))
-    plt.plot(cum_portfolio.index, cum_portfolio, label='Optimized Scale-out Strategy (+50% TP)', color='royalblue', linewidth=2)
-    plt.plot(cum_bnh.index, cum_bnh, label='Universe Buy & Hold', color='gray', linestyle='--', linewidth=1.5)
-    plt.title('Optimized Scale-out Strategy (2020-2026.06)')
+    plt.plot(dates, sim_returns_matrix, color='lightgray', alpha=0.05) # 1000개 선
+    plt.plot(dates, np.mean(sim_returns_matrix, axis=1), color='blue', linewidth=2, label='Mean Simulation')
+    plt.plot(dates, np.percentile(sim_returns_matrix, 5, axis=1), color='red', linestyle='--', linewidth=1.5, label='Worst 5% (VaR)')
+    plt.title('Monte Carlo Simulation of Optimized Strategy (1,000 Paths)')
     plt.ylabel('Cumulative Return')
     plt.xlabel('Date')
     plt.legend(loc='upper left')

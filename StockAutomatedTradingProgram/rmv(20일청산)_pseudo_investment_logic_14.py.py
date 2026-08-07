@@ -1,34 +1,19 @@
-# 상승장 익절 목표 50% & 50%달성 시 절반 청산 후 나머지는 트레일링 스탑에 위임.
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import yfinance as yf
 
-# 백테스팅 기간 설정 (2020년 ~ 2026년 상반기)
 START_DATE = "2020-01-01"
 END_DATE = "2026-06-30"
-
 COMMISSION_PCT = 0.0005
-BASE_SLIPPAGE_PCT = 0.0005
-TARGET_PROFIT_PCT = 0.50  # [수정] +50% 도달 시 50% 분할 익절 후 나머지 트레일링
+SLIPPAGE_PCT = 0.0005
+TARGET_PROFIT_PCT = 0.35  # +35% 도달 시 익절 후 종목 교체
 
-# 파킹통장(CMA 등) 연동 가정: 연 2.5% 금리를 일일 복리로 적용
-CASH_ANNUAL_RATE = 0.025
-CASH_RETURN_DAILY = (1.0 + CASH_ANNUAL_RATE) ** (1.0 / 252.0) - 1.0
-
-def get_modern_robust_universe():
+def get_historical_robust_universe():
     return {
-        "AAPL": "Technology",            
-        "MSFT": "Technology",            
-        "NVDA": "Technology",            
-        "GOOGL": "Communication",        
-        "META": "Communication",         
-        "AMZN": "Consumer Discretionary",
-        "TSLA": "Consumer Discretionary",
-        "UNH": "Healthcare",             
-        "LLY": "Healthcare",             
-        "JPM": "Financials",             
-        "PG": "Consumer Staples"         
+        "AAPL": "Technology", "MSFT": "Technology", "NVDA": "Technology", "GOOGL": "Communication Services",
+        "AMZN": "Consumer Cyclical", "META": "Communication Services", "UNH": "Healthcare", "JNJ": "Healthcare",
+        "JPM": "Financials", "V": "Financials", "XOM": "Energy", "WMT": "Consumer Defensive", "KO": "Consumer Defensive"
     }
 
 def fetch_data(ticker, start, end, buffer_days=250):
@@ -64,19 +49,17 @@ def add_indicators(df):
     df['BB_Lower'] = df['BB_Mid'] - 2.0 * bb_std_val
     df['RSI'] = calc_rsi(df['Close'], period=14)
     df['ATR'] = calc_atr(df, period=14)
-    
-    # [룩어헤드 차단] 지표는 전일(shift(1)) 기준 정렬
-    df['Signal_Short_MA'] = df['Short_MA'].shift(1)
-    df['Signal_RSI'] = df['RSI'].shift(1)
-    df['Signal_Lower'] = df['BB_Lower'].shift(1)
-    df['Signal_ATR'] = df['ATR'].shift(1)
-    df['Signal_Close'] = df['Close'].shift(1)
-    
+    df['Daily_Return'] = df['Close'].pct_change()
     return df
 
 def run_dynamic_strategy_single_stock(df, market_trend_series, market_mom_series):
+    """
+    개별 종목 기준 시뮬레이션
+    [개선 반영] 하락장 강제 청산 조건(holding_days >= 20)을 제거하여 
+    바닥권 종목이 반등할 수 있는 충분한 시간적 여유를 부여합니다.
+    """
     df = df.copy()
-    position = 0.0          # 포지션 비중 (0.0, 0.5, 1.0)
+    position = 0
     entry_price = 0.0
     highest_price = 0.0
     holding_days = 0
@@ -85,102 +68,86 @@ def run_dynamic_strategy_single_stock(df, market_trend_series, market_mom_series
 
     for i in range(len(df)):
         current_date = df.index[i]
-        open_p = df['Open'].iloc[i]
-        close_p = df['Close'].iloc[i]
-        
-        sig_close = df['Signal_Close'].iloc[i]
-        short_ma = df['Signal_Short_MA'].iloc[i]
-        rsi = df['Signal_RSI'].iloc[i]
-        lower = df['Signal_Lower'].iloc[i]
-        atr = df['Signal_ATR'].iloc[i]
+        close = df['Close'].iloc[i]
+        prev_close = df['Close'].iloc[i-1] if i > 0 else close
+        short_ma = df['Short_MA'].iloc[i]
+        rsi = df['RSI'].iloc[i]
+        lower = df['BB_Lower'].iloc[i]
+        atr = df['ATR'].iloc[i]
 
         is_market_bullish = market_trend_series.get(current_date, True)
         is_v_rebound = market_mom_series.get(current_date, False)
 
-        current_atr_pct = (atr / sig_close) if (pd.notna(atr) and sig_close > 0) else 0.02
-        dynamic_slippage = BASE_SLIPPAGE_PCT + max(0.0, current_atr_pct * 0.2)
-
-        if position == 0.0:
+        if position == 0:
             strategy_returns.append(0.0)
             exit_flags.append(False)
 
-            if pd.isna(sig_close):
-                continue
-
             if is_market_bullish or is_v_rebound:
-                is_condition = (pd.notna(short_ma) and sig_close > short_ma) or (pd.notna(rsi) and rsi <= 55)
+                is_condition = (pd.notna(short_ma) and close > short_ma) or (pd.notna(rsi) and rsi <= 55)
             else:
-                is_condition = (pd.notna(rsi) and rsi <= 35) or (pd.notna(lower) and sig_close <= lower)
+                is_condition = (pd.notna(rsi) and rsi <= 35) or (pd.notna(lower) and close <= lower)
 
-            # 전량(1.0) 진입
             if is_condition:
-                position = 1.0
-                entry_price = open_p * (1 + dynamic_slippage)
-                highest_price = open_p
+                position = 1
+                entry_price = close * (1 + SLIPPAGE_PCT)
+                highest_price = entry_price
                 holding_days = 0
-                day_ret = (close_p / open_p) - 1 if open_p > 0 else 0
-                net_day_ret = day_ret - (COMMISSION_PCT + dynamic_slippage)
-                strategy_returns[-1] = net_day_ret
+                strategy_returns[-1] = -(COMMISSION_PCT + SLIPPAGE_PCT)
         else:
             holding_days += 1
-            if close_p > highest_price:
-                highest_price = close_p
+            if close > highest_price:
+                highest_price = close
 
-            prev_close = df['Close'].iloc[i-1] if i > 0 else close_p
-            daily_ret = (close_p / prev_close) - 1 if prev_close > 0 else 0
+            current_atr_pct = (atr / close) if (pd.notna(atr) and close > 0) else 0.02
 
-            # 1) +50% 도달 시점 체크 (포지션 1.0일 때 50% 절반 익절)
-            hit_target_profit = (position == 1.0) and (sig_close >= entry_price * (1 + TARGET_PROFIT_PCT))
+            # 1. 목표 익절 체크 (+35% 도달 시 강제 청산)
+            hit_target_profit = close >= entry_price * (1 + TARGET_PROFIT_PCT)
 
-            if hit_target_profit:
-                half_profit_ret = ((entry_price * (1 + TARGET_PROFIT_PCT)) / prev_close - 1) * 0.5
-                net_day_ret = half_profit_ret + (daily_ret * 0.5) - COMMISSION_PCT
-                strategy_returns.append(net_day_ret)
-                exit_flags.append(False) 
-                position = 0.5  # 잔여 비중 50%로 축소 후 트레일링 위임
+            # 2. 트레일링 스톱 및 손절 체크
+            if is_market_bullish or is_v_rebound:
+                dynamic_trailing_pct = max(0.06, current_atr_pct * 3.0)
+                hit_exit = (close <= highest_price * (1 - dynamic_trailing_pct)) or hit_target_profit
             else:
-                # 2) 트레일링 스탑 / 손절 조건 체크
-                if is_market_bullish or is_v_rebound:
-                    dynamic_trailing_pct = max(0.06, current_atr_pct * 3.0)
-                    hit_exit = (sig_close <= highest_price * (1 - dynamic_trailing_pct))
-                else:
-                    dynamic_sl_pct = max(0.02, current_atr_pct * 1.5)
-                    dynamic_trailing_pct = max(0.03, current_atr_pct * 2.0)
-                    hit_sl = sig_close <= entry_price * (1 - dynamic_sl_pct)
-                    hit_trailing = sig_close <= highest_price * (1 - dynamic_trailing_pct)
-                    hit_exit = hit_sl or hit_trailing
+                # 하락장: 타이트한 ATR 손절 및 트레일링 적용 (holding_days >= 20 조건 제거됨)
+                dynamic_sl_pct = max(0.02, current_atr_pct * 1.5)
+                dynamic_trailing_pct = max(0.03, current_atr_pct * 2.0)
+                hit_sl = close <= entry_price * (1 - dynamic_sl_pct)
+                hit_trailing = close <= highest_price * (1 - dynamic_trailing_pct)
+                hit_exit = hit_sl or hit_trailing or hit_target_profit
 
-                if hit_exit:
-                    net_day_ret = (daily_ret * position) - COMMISSION_PCT
-                    strategy_returns.append(net_day_ret)
-                    exit_flags.append(True) # 잔여 포지션 청산 완료 -> 종목 교체 플래그 ON
+            if hit_exit:
+                daily_ret = (close / prev_close) - 1 if prev_close > 0 else 0
+                net_day_ret = (daily_ret * position) - (COMMISSION_PCT + SLIPPAGE_PCT)
+                strategy_returns.append(net_day_ret)
+                exit_flags.append(True)
 
-                    position = 0.0
-                    entry_price = 0.0
-                    highest_price = 0.0
-                    holding_days = 0
-                else:
-                    strategy_returns.append(daily_ret * position)
-                    exit_flags.append(False)
+                position = 0
+                entry_price = 0.0
+                highest_price = 0.0
+                holding_days = 0
+            else:
+                daily_ret = (close / prev_close) - 1 if prev_close > 0 else 0
+                strategy_returns.append(daily_ret * position)
+                exit_flags.append(False)
 
     df['Strategy_Return'] = strategy_returns
     df['Exit_Flag'] = exit_flags
     return df
 
 if __name__ == "__main__":
-    print("[*] 시장 국면 분석용 SPY 데이터 로딩 중 (2020~2026 상반기)...")
+    print("[*] 시장 국면 분석용 SPY 데이터 로딩 중 (2020~2026)...")
     spy_df = fetch_data("SPY", START_DATE, END_DATE)
     if spy_df is not None:
         spy_df['Market_MA'] = spy_df['Close'].rolling(window=200).mean()
-        market_trend = (spy_df['Close'] > spy_df['Market_MA']).shift(1).to_dict()
-        market_mom = (spy_df['Close'].pct_change(5) > 0.03).shift(1).to_dict()
+        market_trend = (spy_df['Close'] > spy_df['Market_MA']).to_dict()
+        market_mom = (spy_df['Close'].pct_change(5) > 0.03).to_dict()
     else:
         market_trend, market_mom = {}, {}
 
-    universe_dict = get_modern_robust_universe()
+    universe_dict = get_historical_robust_universe()
     all_dfs = {}
 
-    print("[*] 2020년대 유니버스 전체 데이터 준비 중...")
+    print("[*] 유니버스 전체 데이터 준비 중...")
     for ticker, sector in universe_dict.items():
         df = fetch_data(ticker, START_DATE, END_DATE)
         if df is None: continue
@@ -192,7 +159,7 @@ if __name__ == "__main__":
     sample_ticker = list(all_dfs.keys())[0]
     dates = all_dfs[sample_ticker]['df'].index
 
-    print("[*] 최종 포트폴리오 시뮬레이션 실행 중 (+50% 분할 익절 적용)...")
+    print("[*] 동적 리밸런싱 포트폴리오 시뮬레이션 실행 중...")
     processed_dfs = {}
     for t, info in all_dfs.items():
         processed_dfs[t] = run_dynamic_strategy_single_stock(info['df'], market_trend, market_mom)
@@ -200,7 +167,6 @@ if __name__ == "__main__":
     portfolio_returns = []
     bnh_returns = []
     current_portfolio = {}
-    MAX_SLOTS = 3  
 
     for current_date in dates:
         tickers_to_remove = []
@@ -213,7 +179,7 @@ if __name__ == "__main__":
         for t in tickers_to_remove:
             del current_portfolio[t]
 
-        if len(current_portfolio) < MAX_SLOTS:
+        if len(current_portfolio) < 3:
             candidate_scores = []
             for ticker, info in all_dfs.items():
                 if ticker in current_portfolio: continue
@@ -223,13 +189,13 @@ if __name__ == "__main__":
                 if current_date in sub_df.index:
                     idx_pos = sub_df.index.get_loc(current_date)
                     if idx_pos >= 120:
-                        mom_val = sub_df['Close'].iloc[idx_pos - 1] / sub_df['Close'].iloc[idx_pos - 121] - 1
+                        mom_val = sub_df['Close'].iloc[idx_pos] / sub_df['Close'].iloc[idx_pos - 120] - 1
                         candidate_scores.append((ticker, info['sector'], mom_val))
 
             candidate_scores = sorted(candidate_scores, key=lambda x: x[2], reverse=True)
 
             for cand in candidate_scores:
-                if len(current_portfolio) >= MAX_SLOTS: break
+                if len(current_portfolio) >= 3: break
                 t, s, _ = cand
                 current_portfolio[t] = {'sector': s}
 
@@ -237,29 +203,16 @@ if __name__ == "__main__":
         day_bnh_ret = 0.0
 
         active_tickers = list(current_portfolio.keys())
-        active_count = len(active_tickers)
-        
-        if active_count > 0:
+        if len(active_tickers) > 0:
             port_vals, bnh_vals = [], []
             for t in active_tickers:
                 p_df = processed_dfs[t]
                 if current_date in p_df.index:
                     port_vals.append(p_df.loc[current_date, 'Strategy_Return'])
-                    prev_close = p_df['Close'].shift(1).loc[current_date]
-                    curr_close = p_df.loc[current_date, 'Close']
-                    bnh_vals.append((curr_close / prev_close - 1) if pd.notna(prev_close) and prev_close > 0 else 0)
-            
+                    bnh_vals.append(p_df.loc[current_date, 'Daily_Return'])
             if port_vals:
-                stock_weight = active_count / MAX_SLOTS
-                cash_weight = 1.0 - stock_weight
-                
-                weighted_stock_ret = np.mean(port_vals) * stock_weight
-                weighted_cash_ret = CASH_RETURN_DAILY * cash_weight
-                
-                day_port_ret = weighted_stock_ret + weighted_cash_ret
+                day_port_ret = np.mean(port_vals)
                 day_bnh_ret = np.mean(bnh_vals)
-        else:
-            day_port_ret = CASH_RETURN_DAILY
 
         portfolio_returns.append(day_port_ret)
         bnh_returns.append(day_bnh_ret)
@@ -281,23 +234,24 @@ if __name__ == "__main__":
     bnh_sharpe = (bnh_ret_series.mean() / bnh_daily_std) * np.sqrt(252) if bnh_daily_std > 0 else np.nan
 
     print(f"\n{'='*55}")
-    print(f" 최종 최적화 전략 성과 (+50% 익절, 2020 ~ 2026.06)")
+    print(f" 동적 리밸런싱 전략 최종 성과 (2020~2026 상반기)")
+    print(f" [하락장 기간 강제청산 조건 제거 버전]")
     print(f"{'='*55}")
-    print(f" [동적 리밸런싱 전략]")
+    print(f" [동적 리밸런싱 전략 (+35% 익절 + 개선된 트레일링)]")
     print(f"  - 최종 수익률 : {final_port_return * 100:.2f}%")
     print(f"  - 최대낙폭(MDD): {port_mdd * 100:.2f}%")
     print(f"  - 샤프비율     : {port_sharpe:.2f}")
     print(f"{'-'*55}")
-    print(f" [단순보유 (Buy & Hold 유니버스 평균)]")
+    print(f" [단순보유 (Buy & Hold)]")
     print(f"  - 최종 수익률 : {final_bnh_return * 100:.2f}%")
     print(f"  - 최대낙폭(MDD): {bnh_mdd * 100:.2f}%")
     print(f"  - 샤프비율     : {bnh_sharpe:.2f}")
     print(f"{'='*55}")
 
     plt.figure(figsize=(12, 6))
-    plt.plot(cum_portfolio.index, cum_portfolio, label='Optimized Scale-out Strategy (+50% TP)', color='royalblue', linewidth=2)
-    plt.plot(cum_bnh.index, cum_bnh, label='Universe Buy & Hold', color='gray', linestyle='--', linewidth=1.5)
-    plt.title('Optimized Scale-out Strategy (2020-2026.06)')
+    plt.plot(cum_portfolio.index, cum_portfolio, label='Dynamic Strategy (Holding Time Limit Removed)', color='royalblue', linewidth=2)
+    plt.plot(cum_bnh.index, cum_bnh, label='Buy & Hold', color='gray', linestyle='--', linewidth=1.5)
+    plt.title('Dynamic Rebalancing Strategy (Improved) vs. Buy & Hold (2020-2026)')
     plt.ylabel('Cumulative Return')
     plt.xlabel('Date')
     plt.legend(loc='upper left')
