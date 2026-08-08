@@ -10,7 +10,7 @@ END_DATE = "2026-06-30"
 
 COMMISSION_PCT = 0.0005
 BASE_SLIPPAGE_PCT = 0.0005
-TARGET_PROFIT_PCT = 0.50  # [수정] +50% 도달 시 50% 분할 익절 후 나머지 트레일링
+TARGET_PROFIT_PCT = 0.50  # +50% 도달 시 50% 분할 익절 후 나머지 트레일링
 
 # 파킹통장(CMA 등) 연동 가정: 연 2.5% 금리를 일일 복리로 적용
 CASH_ANNUAL_RATE = 0.025
@@ -134,7 +134,8 @@ def run_dynamic_strategy_single_stock(df, market_trend_series, market_mom_series
 
             if hit_target_profit:
                 half_profit_ret = ((entry_price * (1 + TARGET_PROFIT_PCT)) / prev_close - 1) * 0.5
-                net_day_ret = half_profit_ret + (daily_ret * 0.5) - COMMISSION_PCT
+                # [수정] 절반 매도분에도 커미션+슬리피지 비용 반영 (기존엔 커미션만 차감되던 버그)
+                net_day_ret = half_profit_ret + (daily_ret * 0.5) - (COMMISSION_PCT + dynamic_slippage) * 0.5
                 strategy_returns.append(net_day_ret)
                 exit_flags.append(False) 
                 position = 0.5  # 잔여 비중 50%로 축소 후 트레일링 위임
@@ -151,7 +152,8 @@ def run_dynamic_strategy_single_stock(df, market_trend_series, market_mom_series
                     hit_exit = hit_sl or hit_trailing
 
                 if hit_exit:
-                    net_day_ret = (daily_ret * position) - COMMISSION_PCT
+                    # [수정] 전량 청산 시에도 커미션+슬리피지 비용 반영 (기존엔 커미션만 차감되던 버그)
+                    net_day_ret = (daily_ret * position) - (COMMISSION_PCT + dynamic_slippage) * position
                     strategy_returns.append(net_day_ret)
                     exit_flags.append(True) # 잔여 포지션 청산 완료 -> 종목 교체 플래그 ON
 
@@ -192,7 +194,7 @@ if __name__ == "__main__":
     sample_ticker = list(all_dfs.keys())[0]
     dates = all_dfs[sample_ticker]['df'].index
 
-    print("[*] 최종 포트폴리오 시뮬레이션 실행 중 (+50% 분할 익절 적용)...")
+    print("[*] 최종 포트폴리오 시뮬레이션 실행 중 (+50% 분할 익절, 슬리피지 수정 적용)...")
     processed_dfs = {}
     for t, info in all_dfs.items():
         processed_dfs[t] = run_dynamic_strategy_single_stock(info['df'], market_trend, market_mom)
@@ -281,7 +283,7 @@ if __name__ == "__main__":
     bnh_sharpe = (bnh_ret_series.mean() / bnh_daily_std) * np.sqrt(252) if bnh_daily_std > 0 else np.nan
 
     print(f"\n{'='*55}")
-    print(f" 최종 최적화 전략 성과 (+50% 익절, 2020 ~ 2026.06)")
+    print(f" 최종 최적화 전략 성과 (+50% 익절, 슬리피지 수정, 2020 ~ 2026.06)")
     print(f"{'='*55}")
     print(f" [동적 리밸런싱 전략]")
     print(f"  - 최종 수익률 : {final_port_return * 100:.2f}%")
@@ -295,7 +297,7 @@ if __name__ == "__main__":
     print(f"{'='*55}")
 
     plt.figure(figsize=(12, 6))
-    plt.plot(cum_portfolio.index, cum_portfolio, label='Optimized Scale-out Strategy (+50% TP)', color='royalblue', linewidth=2)
+    plt.plot(cum_portfolio.index, cum_portfolio, label='Optimized Scale-out Strategy (+50% TP, Slippage Fixed)', color='royalblue', linewidth=2)
     plt.plot(cum_bnh.index, cum_bnh, label='Universe Buy & Hold', color='gray', linestyle='--', linewidth=1.5)
     plt.title('Optimized Scale-out Strategy (2020-2026.06)')
     plt.ylabel('Cumulative Return')
