@@ -10,7 +10,7 @@ END_DATE = "2026-06-30"
 
 COMMISSION_PCT = 0.0005
 BASE_SLIPPAGE_PCT = 0.0005
-TARGET_PROFIT_PCT = 0.50  # +50% 도달 시 50% 분할 익절 후 나머지 트레일링
+# TARGET_PROFIT_PCT = 0.50  # <-- 분할 익절 로직 완전 OFF (수익 극대화)
 
 # 파킹통장(CMA 등) 연동 가정: 연 2.5% 금리를 일일 복리로 적용
 CASH_ANNUAL_RATE = 0.025
@@ -65,7 +65,8 @@ def add_indicators(df):
     df['RSI'] = calc_rsi(df['Close'], period=14)
     df['ATR'] = calc_atr(df, period=14)
     
-    # [룩어헤드 차단] 지표는 전일(shift(1)) 기준 정렬
+    # 룩어헤드 차단 방어선 (전일 Shift 기준)
+    df['Signal_Trend_MA'] = df['Trend_MA'].shift(1)
     df['Signal_Short_MA'] = df['Short_MA'].shift(1)
     df['Signal_RSI'] = df['RSI'].shift(1)
     df['Signal_Lower'] = df['BB_Lower'].shift(1)
@@ -76,7 +77,7 @@ def add_indicators(df):
 
 def run_dynamic_strategy_single_stock(df, market_trend_series, market_mom_series):
     df = df.copy()
-    position = 0.0          # 포지션 비중 (0.0, 0.5, 1.0)
+    position = 0.0          # 포지션 비중 (0.0 또는 1.0)
     entry_price = 0.0
     highest_price = 0.0
     holding_days = 0
@@ -89,6 +90,7 @@ def run_dynamic_strategy_single_stock(df, market_trend_series, market_mom_series
         close_p = df['Close'].iloc[i]
         
         sig_close = df['Signal_Close'].iloc[i]
+        trend_ma = df['Signal_Trend_MA'].iloc[i]
         short_ma = df['Signal_Short_MA'].iloc[i]
         rsi = df['Signal_RSI'].iloc[i]
         lower = df['Signal_Lower'].iloc[i]
@@ -107,12 +109,14 @@ def run_dynamic_strategy_single_stock(df, market_trend_series, market_mom_series
             if pd.isna(sig_close):
                 continue
 
+            # [개선 1] 저변동성/횡보장 진입 필터 (최소 1.2% 이상의 일일 변동성 요구)
+            is_valid_volatility = (current_atr_pct >= 0.012)
+            
             if is_market_bullish or is_v_rebound:
-                is_condition = (pd.notna(short_ma) and sig_close > short_ma) or (pd.notna(rsi) and rsi <= 55)
+                is_condition = ((pd.notna(short_ma) and sig_close > short_ma) or (pd.notna(rsi) and rsi <= 55)) and is_valid_volatility
             else:
-                is_condition = (pd.notna(rsi) and rsi <= 35) or (pd.notna(lower) and sig_close <= lower)
+                is_condition = ((pd.notna(rsi) and rsi <= 35) or (pd.notna(lower) and sig_close <= lower)) and is_valid_volatility
 
-            # 전량(1.0) 진입
             if is_condition:
                 position = 1.0
                 entry_price = open_p * (1 + dynamic_slippage)
@@ -129,41 +133,32 @@ def run_dynamic_strategy_single_stock(df, market_trend_series, market_mom_series
             prev_close = df['Close'].iloc[i-1] if i > 0 else close_p
             daily_ret = (close_p / prev_close) - 1 if prev_close > 0 else 0
 
-            # 1) +50% 도달 시점 체크 (포지션 1.0일 때 50% 절반 익절)
-            hit_target_profit = (position == 1.0) and (sig_close >= entry_price * (1 + TARGET_PROFIT_PCT))
-
-            if hit_target_profit:
-                half_profit_ret = ((entry_price * (1 + TARGET_PROFIT_PCT)) / prev_close - 1) * 0.5
-                # [수정] 절반 매도분에도 커미션+슬리피지 비용 반영 (기존엔 커미션만 차감되던 버그)
-                net_day_ret = half_profit_ret + (daily_ret * 0.5) - (COMMISSION_PCT + dynamic_slippage) * 0.5
-                strategy_returns.append(net_day_ret)
-                exit_flags.append(False) 
-                position = 0.5  # 잔여 비중 50%로 축소 후 트레일링 위임
+            # [개선 2] 초강세장 트레일링 스탑 완화 (200일선 위 15% 이상 이격된 슈퍼 불마켓 대응)
+            is_super_bull = (pd.notna(trend_ma) and sig_close > trend_ma * 1.15)
+            
+            if is_market_bullish or is_v_rebound:
+                multiplier = 4.5 if is_super_bull else 3.0
+                dynamic_trailing_pct = max(0.08 if is_super_bull else 0.06, current_atr_pct * multiplier)
+                hit_exit = (sig_close <= highest_price * (1 - dynamic_trailing_pct))
             else:
-                # 2) 트레일링 스탑 / 손절 조건 체크
-                if is_market_bullish or is_v_rebound:
-                    dynamic_trailing_pct = max(0.06, current_atr_pct * 3.0)
-                    hit_exit = (sig_close <= highest_price * (1 - dynamic_trailing_pct))
-                else:
-                    dynamic_sl_pct = max(0.02, current_atr_pct * 1.5)
-                    dynamic_trailing_pct = max(0.03, current_atr_pct * 2.0)
-                    hit_sl = sig_close <= entry_price * (1 - dynamic_sl_pct)
-                    hit_trailing = sig_close <= highest_price * (1 - dynamic_trailing_pct)
-                    hit_exit = hit_sl or hit_trailing
+                dynamic_sl_pct = max(0.02, current_atr_pct * 1.5)
+                dynamic_trailing_pct = max(0.03, current_atr_pct * 2.0)
+                hit_sl = sig_close <= entry_price * (1 - dynamic_sl_pct)
+                hit_trailing = sig_close <= highest_price * (1 - dynamic_trailing_pct)
+                hit_exit = hit_sl or hit_trailing
 
-                if hit_exit:
-                    # [수정] 전량 청산 시에도 커미션+슬리피지 비용 반영 (기존엔 커미션만 차감되던 버그)
-                    net_day_ret = (daily_ret * position) - (COMMISSION_PCT + dynamic_slippage) * position
-                    strategy_returns.append(net_day_ret)
-                    exit_flags.append(True) # 잔여 포지션 청산 완료 -> 종목 교체 플래그 ON
+            if hit_exit:
+                net_day_ret = daily_ret - (COMMISSION_PCT + dynamic_slippage)
+                strategy_returns.append(net_day_ret)
+                exit_flags.append(True) # 전량 청산 완료 -> 종목 교체 플래그 ON
 
-                    position = 0.0
-                    entry_price = 0.0
-                    highest_price = 0.0
-                    holding_days = 0
-                else:
-                    strategy_returns.append(daily_ret * position)
-                    exit_flags.append(False)
+                position = 0.0
+                entry_price = 0.0
+                highest_price = 0.0
+                holding_days = 0
+            else:
+                strategy_returns.append(daily_ret)
+                exit_flags.append(False)
 
     df['Strategy_Return'] = strategy_returns
     df['Exit_Flag'] = exit_flags
@@ -194,7 +189,7 @@ if __name__ == "__main__":
     sample_ticker = list(all_dfs.keys())[0]
     dates = all_dfs[sample_ticker]['df'].index
 
-    print("[*] 최종 포트폴리오 시뮬레이션 실행 중 (+50% 분할 익절, 슬리피지 수정 적용)...")
+    print("[*] 최종 최적화 전략 시뮬레이션 실행 중 (익절OFF + 진입필터 + 트레일링완화)...")
     processed_dfs = {}
     for t, info in all_dfs.items():
         processed_dfs[t] = run_dynamic_strategy_single_stock(info['df'], market_trend, market_mom)
@@ -282,24 +277,24 @@ if __name__ == "__main__":
     bnh_daily_std = bnh_ret_series.std()
     bnh_sharpe = (bnh_ret_series.mean() / bnh_daily_std) * np.sqrt(252) if bnh_daily_std > 0 else np.nan
 
-    print(f"\n{'='*55}")
-    print(f" 최종 최적화 전략 성과 (+50% 익절, 슬리피지 수정, 2020 ~ 2026.06)")
-    print(f"{'='*55}")
-    print(f" [동적 리밸런싱 전략]")
+    print(f"\n{'='*65}")
+    print(f" 🚀 최종 개선된 동적 전략 성과 (익절OFF + 진입필터 + 트레일링완화)")
+    print(f"{'='*65}")
+    print(f" [최적화 전략]")
     print(f"  - 최종 수익률 : {final_port_return * 100:.2f}%")
     print(f"  - 최대낙폭(MDD): {port_mdd * 100:.2f}%")
     print(f"  - 샤프비율     : {port_sharpe:.2f}")
-    print(f"{'-'*55}")
+    print(f"{'-'*65}")
     print(f" [단순보유 (Buy & Hold 유니버스 평균)]")
     print(f"  - 최종 수익률 : {final_bnh_return * 100:.2f}%")
     print(f"  - 최대낙폭(MDD): {bnh_mdd * 100:.2f}%")
     print(f"  - 샤프비율     : {bnh_sharpe:.2f}")
-    print(f"{'='*55}")
+    print(f"{'='*65}")
 
     plt.figure(figsize=(12, 6))
-    plt.plot(cum_portfolio.index, cum_portfolio, label='Optimized Scale-out Strategy (+50% TP, Slippage Fixed)', color='royalblue', linewidth=2)
+    plt.plot(cum_portfolio.index, cum_portfolio, label='Fully Optimized Strategy (No TP + Vol Filter + Wide Trailing)', color='royalblue', linewidth=2)
     plt.plot(cum_bnh.index, cum_bnh, label='Universe Buy & Hold', color='gray', linestyle='--', linewidth=1.5)
-    plt.title('Optimized Scale-out Strategy (2020-2026.06)')
+    plt.title('Fully Optimized Trend Strategy (2020-2026.06)')
     plt.ylabel('Cumulative Return')
     plt.xlabel('Date')
     plt.legend(loc='upper left')
